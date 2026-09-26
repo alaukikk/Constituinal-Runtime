@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from guardrails.injection_screen import screen_request, ScreenVerdict
 from policy.engine import get_policy_engine
 from policy.schemas import PolicyAction, MethodTier, RoutingDecision, TierCostEstimate
-from tiers.cache_lookup import try_cache_lookup
+from tiers.cache_lookup import try_cache_lookup, store_cache_entry
 from tiers.deterministic import try_deterministic
 from tiers.small_classifier import try_small_classifier
 from tiers.rag_small_model import try_rag_small_model
@@ -117,17 +117,16 @@ def process_request(text: str, session_id: str | None = None) -> PipelineResult:
         )
 
     # --- Stage 3/5 ---
-    tier_used = None
-    result_text = None
-    for tier, fn in _TIER_LADDER:
-        candidate = fn(normalized)
-        if candidate is not None:
-            tier_used, result_text = tier, candidate
-            break
-
     if result_text is None:
         tier_used = MethodTier.LLM_LOW_REASONING
         result_text = call_llm(normalized)
+        store_cache_entry(normalized, result_text)
+    elif tier_used != MethodTier.CACHE:
+        # Populate the cache for next exact repeat. Don't re-store a value
+        # that was ITSELF a cache hit -- that would just refresh its TTL for
+        # no reason, and (more importantly) would be misleading in a future
+        # audit trail read as "written after a fresh computation."
+        store_cache_entry(normalized, result_text)
 
     # --- Stage 7 (partial -- audit_log.py is the Sprint 1 subset schema) ---
     log_decision(session_id, RoutingDecision(
